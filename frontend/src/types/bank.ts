@@ -47,3 +47,21 @@ export interface Dashboard {
   rankings: Ranking[];
   radar: { axis: string; value: number }[];
 }
+
+export interface PaperDraft {
+  paper_id: number;
+  difficulty: string;
+  amount: number;
+  paper: Question[];
+  answers: Record<string, string>;
+  uncertain: number[];
+  updated_at: string;
+}
+
+export interface ExamReport {
+  score: number;
+  correct: number;
+  total: number;
+  rank_hint: string;
+  analysis: string[];
+}

@@ -71,6 +71,31 @@ body {
   background: #fbfdfc;
 }
 
+.question-card-next {
+  border-color: #2f6b57;
+  box-shadow: 0 0 0 2px rgba(47, 107, 87, 0.15);
+}
+
+.resume-banner {
+  margin-bottom: 12px;
+}
+
+.paper-progress {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.paper-progress-side {
+  justify-content: flex-end;
+}
+
+.question-actions {
+  margin-top: 10px;
+}
+
 .question-meta {
   margin-bottom: 8px;
 }
@@ -130,5 +155,9 @@ body {
 
   .paper-form {
     display: grid;
+  }
+
+  .paper-progress {
+    grid-template-columns: 1fr;
   }
 }
