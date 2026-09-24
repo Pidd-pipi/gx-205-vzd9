@@ -1,7 +1,32 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Card, Col, ConfigProvider, Form, Layout, Progress, Radio, Row, Select, Space, Statistic, Table, Tag, Typography } from 'antd';
-import { BookOutlined, ClockCircleOutlined, CrownOutlined, ExperimentOutlined, ReloadOutlined } from '@ant-design/icons';
-import { api } from '@/api/client';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Alert,
+  Button,
+  Card,
+  Col,
+  ConfigProvider,
+  Form,
+  Layout,
+  Progress,
+  Radio,
+  Row,
+  Select,
+  Space,
+  Statistic,
+  Table,
+  Tag,
+  Typography
+} from 'antd';
+import {
+  BookOutlined,
+  CheckCircleFilled,
+  ClockCircleOutlined,
+  CrownOutlined,
+  ExperimentOutlined,
+  FlagFilled,
+  ReloadOutlined
+} from '@ant-design/icons';
+import { getAccessToken } from '@/api/client';
 import { AbilityRadar } from '@/components/AbilityRadar';
 import { useBankStore } from '@/store/useBankStore';
 
@@ -9,22 +34,81 @@ const { Content } = Layout;
 const { Title, Paragraph, Text } = Typography;
 
 function App() {
-  const { dashboard, loading, error, loadDashboard, demoLogin } = useBankStore();
+  const {
+    dashboard,
+    loading,
+    error,
+    draft,
+    answers,
+    unsure,
+    currentIndex,
+    report,
+    submitted,
+    saveState,
+    submitting,
+    loadDashboard,
+    demoLogin,
+    restoreDraft,
+    generatePaper,
+    selectAnswer,
+    toggleUnsure,
+    submitExam,
+    flushSave
+  } = useBankStore();
+  const questionRefs = useRef<Array<HTMLDivElement | null>>([]);
   const [difficulty, setDifficulty] = useState('中级');
   const [amount, setAmount] = useState(10);
-  const [answers, setAnswers] = useState<Record<number, string>>({});
-  const [report, setReport] = useState<string[]>([]);
 
   useEffect(() => {
     loadDashboard();
-  }, [loadDashboard]);
+    restoreDraft();
+  }, [loadDashboard, restoreDraft]);
 
-  const paper = useMemo(() => dashboard?.paper ?? [], [dashboard]);
+  useEffect(() => {
+    function persistOnLeave() {
+      void flushSave();
+    }
+    function persistWhenHidden() {
+      if (document.visibilityState === 'hidden') void flushSave();
+    }
+    window.addEventListener('pagehide', persistOnLeave);
+    document.addEventListener('visibilitychange', persistWhenHidden);
+    return () => {
+      window.removeEventListener('pagehide', persistOnLeave);
+      document.removeEventListener('visibilitychange', persistWhenHidden);
+    };
+  }, [flushSave]);
 
-  async function submitExam() {
-    const result = await api.submitExam(answers);
-    setReport([`得分 ${result.score}`, result.rank_hint, ...result.analysis]);
+  useEffect(() => {
+    if (draft) {
+      setDifficulty(draft.difficulty);
+      setAmount(draft.amount);
+    }
+  }, [draft]);
+
+  useEffect(() => {
+    if (draft && !submitted) {
+      const timer = setTimeout(() => scrollToQuestion(currentIndex), 200);
+      return () => clearTimeout(timer);
+    }
+  }, [draft, submitted, currentIndex]);
+
+  const paper = draft?.paper ?? [];
+  const answeredCount = useMemo(
+    () => paper.filter((question) => answers[question.id]).length,
+    [paper, answers]
+  );
+
+  function scrollToQuestion(index: number) {
+    questionRefs.current[index]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
+
+  const saveMessage = {
+    idle: '',
+    saving: '自动保存中…',
+    saved: '草稿已自动保存，换设备登录也可继续',
+    error: '自动保存失败，请检查网络后继续作答'
+  }[saveState];
 
   return (
     <ConfigProvider theme={{ token: { borderRadius: 8, colorPrimary: '#2f6b57' } }}>
@@ -55,37 +139,171 @@ function App() {
 
               <Row gutter={[16, 16]} className="block">
                 <Col xs={24} lg={15}>
-                  <Card title="智能组卷练习" extra={<Tag color="green">限时考试可扩展</Tag>}>
+                  <Card
+                    title="智能组卷练习"
+                    extra={
+                      <Space>
+                        {getAccessToken() && <Tag color="green">演示账号已登录</Tag>}
+                        <Tag color={submitted ? 'default' : 'gold'}>
+                          {submitted ? '已交卷' : `已答 ${answeredCount}/${paper.length || 0}`}
+                        </Tag>
+                      </Space>
+                    }
+                  >
                     <Form layout="inline" className="paper-form">
                       <Form.Item label="难度">
-                        <Select value={difficulty} onChange={setDifficulty} options={['入门', '初级', '中级', '高级', '专家'].map((value) => ({ value, label: value }))} />
+                        <Select
+                          value={difficulty}
+                          onChange={setDifficulty}
+                          options={['入门', '初级', '中级', '高级', '专家'].map((value) => ({ value, label: value }))}
+                        />
                       </Form.Item>
                       <Form.Item label="题量">
-                        <Select value={amount} onChange={setAmount} options={[10, 20, 30, 50].map((value) => ({ value, label: `${value} 题` }))} />
+                        <Select
+                          value={amount}
+                          onChange={setAmount}
+                          options={[10, 20, 30, 50].map((value) => ({ value, label: `${value} 题` }))}
+                        />
                       </Form.Item>
-                      <Button icon={<ExperimentOutlined />} onClick={() => api.generatePaper(difficulty, amount)}>生成试卷</Button>
+                      <Button type="primary" icon={<ExperimentOutlined />} onClick={() => generatePaper(difficulty, amount)}>
+                        {draft && !submitted ? '放弃草稿并重新组卷' : '生成试卷'}
+                      </Button>
                     </Form>
 
-                    <Space direction="vertical" size={16} className="question-list">
-                      {paper.map((question, index) => (
-                        <Card key={question.id} size="small" className="question-card">
-                          <Space wrap className="question-meta">
-                            <Tag>{question.type}</Tag>
-                            <Tag color="blue">{question.difficulty}</Tag>
-                            <Tag color="gold">{question.knowledge}</Tag>
-                          </Space>
-                          <Title level={5}>{index + 1}. {question.stem}</Title>
-                          <Radio.Group value={answers[question.id]} onChange={(event) => setAnswers({ ...answers, [question.id]: event.target.value })}>
-                            <Space direction="vertical">
-                              {question.options.map((option) => <Radio key={option} value={option}>{option}</Radio>)}
-                            </Space>
-                          </Radio.Group>
-                          <Paragraph className="explain">解析：{question.explanation}</Paragraph>
-                        </Card>
-                      ))}
-                    </Space>
-                    <Button type="primary" className="submit" onClick={submitExam}>提交并生成报告</Button>
-                    {report.length > 0 && <Alert type="success" message="考试报告" description={report.join('；')} showIcon className="block" />}
+                    {!draft && (
+                      <Alert
+                        type="info"
+                        showIcon
+                        className="block"
+                        message="选择难度和题量后生成试卷"
+                        description="答案、不确定标记和未完成位置会自动保存到账号；重新打开页面或换一台电脑登录，都可以继续作答。"
+                      />
+                    )}
+
+                    {draft && saveMessage && (
+                      <Alert
+                        type={saveState === 'error' ? 'warning' : 'success'}
+                        showIcon
+                        className="block"
+                        message={saveMessage}
+                      />
+                    )}
+
+                    {draft && (
+                      <>
+                        <div className="question-nav">
+                          {paper.map((question, index) => {
+                            const answered = Boolean(answers[question.id]);
+                            const isUnsure = unsure.includes(question.id);
+                            return (
+                              <button
+                                key={question.id}
+                                type="button"
+                                title={`第 ${index + 1} 题`}
+                                className={[
+                                  'question-nav-item',
+                                  answered ? 'answered' : '',
+                                  isUnsure ? 'unsure' : '',
+                                  index === currentIndex ? 'current' : ''
+                                ].join(' ')}
+                                onClick={() => scrollToQuestion(index)}
+                              >
+                                {index + 1}
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        {!submitted && (
+                          <Alert
+                            type="warning"
+                            showIcon
+                            className="block"
+                            message={`未完成位置：第 ${currentIndex + 1} 题`}
+                            description="题号导航中高亮的是第一道未完成题；黄色边框表示标记了不确定。"
+                          />
+                        )}
+
+                        <Space direction="vertical" size={16} className="question-list">
+                          {paper.map((question, index) => {
+                            const isUnsure = unsure.includes(question.id);
+                            const isCurrent = index === currentIndex && !submitted;
+                            return (
+                              <div
+                                key={question.id}
+                                ref={(node) => {
+                                  questionRefs.current[index] = node;
+                                }}
+                                className={[
+                                  'question-card-wrap',
+                                  isCurrent ? 'current-question' : '',
+                                  isUnsure ? 'unsure-question' : ''
+                                ].join(' ')}
+                              >
+                                <Card size="small">
+                                  <Space wrap className="question-meta">
+                                    <Tag>{question.type}</Tag>
+                                    <Tag color="blue">{question.difficulty}</Tag>
+                                    <Tag color="gold">{question.knowledge}</Tag>
+                                    {answers[question.id] && <Tag color="green" icon={<CheckCircleFilled />}>已作答</Tag>}
+                                    {isCurrent && <Tag color="orange">未完成位置</Tag>}
+                                  </Space>
+                                  <div className="question-heading">
+                                    <Title level={5}>{index + 1}. {question.stem}</Title>
+                                    <Button
+                                      size="small"
+                                      type={isUnsure ? 'primary' : 'default'}
+                                      danger={isUnsure}
+                                      icon={<FlagFilled />}
+                                      disabled={submitted}
+                                      onClick={() => toggleUnsure(question.id)}
+                                    >
+                                      {isUnsure ? '取消不确定' : '标记不确定'}
+                                    </Button>
+                                  </div>
+                                  <Radio.Group
+                                    value={answers[question.id]}
+                                    disabled={submitted}
+                                    onChange={(event) => selectAnswer(question.id, event.target.value as string)}
+                                  >
+                                    <Space direction="vertical">
+                                      {question.options.map((option) => <Radio key={option} value={option}>{option}</Radio>)}
+                                    </Space>
+                                  </Radio.Group>
+                                  <Paragraph className="explain">解析：{question.explanation}</Paragraph>
+                                </Card>
+                              </div>
+                            );
+                          })}
+                        </Space>
+
+                        <Button
+                          type="primary"
+                          size="large"
+                          className="submit"
+                          loading={submitting}
+                          onClick={submitExam}
+                        >
+                          {submitted ? '重复提交（返回原报告）' : '提交并生成报告'}
+                        </Button>
+
+                        {report && (
+                          <Alert
+                            type="success"
+                            showIcon
+                            className="block"
+                            message={`考试报告：${report.score} 分（${report.correct}/${report.total}）`}
+                            description={
+                              <Space direction="vertical" size={4}>
+                                <Text>{report.rank_hint}</Text>
+                                <Text>{report.analysis.join('；')}</Text>
+                                <Text type="secondary">草稿已失效；重复提交本试卷仍会返回同一份报告。</Text>
+                              </Space>
+                            }
+                          />
+                        )}
+                      </>
+                    )}
                   </Card>
                 </Col>
 

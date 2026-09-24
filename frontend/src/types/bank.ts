@@ -6,7 +6,8 @@ export interface Category {
 }
 
 export interface Question {
-  id: number;
+  id: string;
+  source_id?: number;
   type: string;
   difficulty: string;
   stem: string;
@@ -14,6 +15,28 @@ export interface Question {
   answer: string;
   explanation: string;
   knowledge: string;
+}
+
+export type Answers = Record<string, string>;
+
+export interface PaperDraft {
+  paper_id: string;
+  difficulty: string;
+  amount: number;
+  paper: Question[];
+  answers: Answers;
+  unsure: string[];
+  current_index: number;
+  updated_at: string;
+}
+
+export interface ExamReport {
+  paper_id: string;
+  score: number;
+  correct: number;
+  total: number;
+  rank_hint: string;
+  analysis: string[];
 }
 
 export interface Ranking {
@@ -42,7 +65,6 @@ export interface Dashboard {
     practiceMinutes: number;
   };
   categories: Category[];
-  paper: Question[];
   wrongBook: WrongBookItem[];
   rankings: Ranking[];
   radar: { axis: string; value: number }[];

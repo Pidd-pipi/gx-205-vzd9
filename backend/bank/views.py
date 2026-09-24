@@ -1,9 +1,15 @@
+import uuid
+
 from django.contrib.auth import get_user_model
-from rest_framework.decorators import api_view
+from django.db import IntegrityError, transaction
+from rest_framework import status
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from bank.serializers import GeneratePaperSerializer, SubmitExamSerializer
+from bank.models import ExamDraft, ExamSubmission
+from bank.serializers import GeneratePaperSerializer, SaveDraftSerializer, SubmitExamSerializer
 
 
 QUESTIONS = [
@@ -40,6 +46,32 @@ QUESTIONS = [
 ]
 
 
+def build_paper_instances(amount: int) -> list[dict]:
+    """把题库模板展开成一份试卷，每道题实例拥有全局唯一 id，避免答案互相覆盖。"""
+    paper = []
+    for index in range(amount):
+        template = QUESTIONS[index % len(QUESTIONS)]
+        paper.append({**template, "source_id": template["id"], "id": uuid.uuid4().hex})
+    return paper
+
+
+def draft_payload(draft: ExamDraft) -> dict:
+    return {
+        "paper_id": str(draft.paper_id),
+        "difficulty": draft.difficulty,
+        "amount": draft.amount,
+        "paper": draft.questions,
+        "answers": draft.answers,
+        "unsure": draft.unsure,
+        "current_index": draft.current_index,
+        "updated_at": draft.updated_at.isoformat(),
+    }
+
+
+def submission_payload(submission: ExamSubmission) -> dict:
+    return {"paper_id": str(submission.paper_id), **submission.report}
+
+
 def build_dashboard() -> dict:
     return {
         "profile": {
@@ -57,7 +89,6 @@ def build_dashboard() -> dict:
             {"id": 4, "name": "类比推理", "accuracy": 84, "total": 210},
             {"id": 5, "name": "演绎推理", "accuracy": 80, "total": 210},
         ],
-        "paper": QUESTIONS,
         "wrongBook": [
             {"id": 1, "title": "集合包含关系反推", "type": "演绎推理", "mistakes": 5, "lastPracticed": "05-28"},
             {"id": 2, "title": "九宫格旋转规律", "type": "图形推理", "mistakes": 4, "lastPracticed": "05-27"},
@@ -89,28 +120,116 @@ def dashboard(_request):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def generate_paper(request):
     serializer = GeneratePaperSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
+    difficulty = serializer.validated_data["difficulty"]
     amount = int(serializer.validated_data["amount"])
-    repeated = (QUESTIONS * ((amount // len(QUESTIONS)) + 1))[:amount]
-    return Response({"paper": repeated})
+
+    with transaction.atomic():
+        # 生成新试卷后，旧的进行中草稿作废，保证“接着上次那套题”永远指向最新一套。
+        ExamDraft.objects.filter(user=request.user, status=ExamDraft.STATUS_ACTIVE).update(
+            status=ExamDraft.STATUS_SUBMITTED
+        )
+        draft = ExamDraft.objects.create(
+            user=request.user,
+            paper_id=uuid.uuid4(),
+            difficulty=difficulty,
+            amount=amount,
+            questions=build_paper_instances(amount),
+        )
+    return Response(draft_payload(draft), status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def current_draft(request):
+    draft = (
+        ExamDraft.objects.filter(user=request.user, status=ExamDraft.STATUS_ACTIVE)
+        .order_by("-updated_at")
+        .first()
+    )
+    return Response({"draft": draft_payload(draft) if draft else None})
+
+
+@api_view(["PUT"])
+@permission_classes([IsAuthenticated])
+def save_draft(request):
+    serializer = SaveDraftSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    data = serializer.validated_data
+
+    draft = ExamDraft.objects.filter(user=request.user, paper_id=data["paper_id"]).first()
+    if draft is None:
+        return Response({"detail": "试卷不存在"}, status=status.HTTP_404_NOT_FOUND)
+    if draft.status != ExamDraft.STATUS_ACTIVE:
+        return Response({"detail": "试卷已交卷，草稿已失效"}, status=status.HTTP_409_CONFLICT)
+
+    if "answers" in data:
+        draft.answers = data["answers"]
+    if "unsure" in data:
+        draft.unsure = data["unsure"]
+    if "current_index" in data:
+        draft.current_index = min(data["current_index"], max(len(draft.questions) - 1, 0))
+    draft.save()
+    return Response(draft_payload(draft))
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def submit_exam(request):
     serializer = SubmitExamSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
-    answers = serializer.validated_data.get("answers", {})
-    correct = sum(1 for question in QUESTIONS if answers.get(str(question["id"])) == question["answer"])
-    score = round(correct / len(QUESTIONS) * 100)
-    return Response(
-        {
-            "score": score,
-            "rank_hint": "本次表现接近黄金 I，继续强化图形推理可冲击铂金。",
-            "analysis": ["数字推理稳定", "图形旋转规律仍需复盘", "演绎推理建议练习充分必要条件"],
-        }
+    paper_id = serializer.validated_data["paper_id"]
+
+    # 幂等：同一份试卷重复提交，直接返回首次生成的报告。
+    existing = ExamSubmission.objects.filter(user=request.user, paper_id=paper_id).first()
+    if existing:
+        return Response(submission_payload(existing))
+
+    draft = ExamDraft.objects.filter(
+        user=request.user, paper_id=paper_id, status=ExamDraft.STATUS_ACTIVE
+    ).first()
+    if draft is None:
+        return Response(
+            {"detail": "试卷不存在或已交卷"}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    answers = serializer.validated_data.get("answers") or draft.answers
+    correct = sum(
+        1 for question in draft.questions if answers.get(str(question["id"])) == question["answer"]
     )
+    total = len(draft.questions)
+    score = round(correct / total * 100) if total else 0
+    report = {
+        "score": score,
+        "correct": correct,
+        "total": total,
+        "rank_hint": "本次表现接近黄金 I，继续强化图形推理可冲击铂金。",
+        "analysis": ["数字推理稳定", "图形旋转规律仍需复盘", "演绎推理建议练习充分必要条件"],
+    }
+
+    try:
+        with transaction.atomic():
+            submission = ExamSubmission.objects.create(
+                user=request.user,
+                paper_id=paper_id,
+                answers=answers,
+                unsure=draft.unsure,
+                score=score,
+                total=total,
+                correct=correct,
+                report=report,
+            )
+            draft.answers = answers
+            draft.status = ExamDraft.STATUS_SUBMITTED
+            draft.save(update_fields=["answers", "status", "updated_at"])
+    except IntegrityError:
+        # 并发重复提交：唯一约束生效，返回已存在的那份报告。
+        submission = ExamSubmission.objects.get(user=request.user, paper_id=paper_id)
+
+    return Response(submission_payload(submission))
 
 
 @api_view(["POST"])
